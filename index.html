@@ -607,7 +607,16 @@ const QUOTES=[
 // ================================================================
 // FIREBASE MODULE
 // ================================================================
-let db=null,auth=null,fbUser=null,fbUnsub=null;
+let db=null,auth=null;
+const SYNC_ID_KEY="karol_sync_id";
+
+function getSyncId(){
+  let id=localStorage.getItem(SYNC_ID_KEY);
+  if(!id){id="karol_"+Math.random().toString(36).slice(2,8)+"_"+Math.random().toString(36).slice(2,8);localStorage.setItem(SYNC_ID_KEY,id)}
+  return id;
+}
+function setSyncId(id){localStorage.setItem(SYNC_ID_KEY,id.trim())}
+
 function initFirebase(cfg){
   try{
     const app=firebase.apps.length?firebase.app():firebase.initializeApp(cfg);
@@ -615,30 +624,26 @@ function initFirebase(cfg){
     return true;
   }catch(e){console.error("Firebase init:",e);return false}
 }
-async function fbSignIn(){
+async function fbConnect(){
   if(!auth)return null;
-  // Try silent re-auth first (already signed in)
-  if(auth.currentUser)return auth.currentUser;
   try{
-    const provider=new firebase.auth.GoogleAuthProvider();
-    provider.setCustomParameters({prompt:"select_account"});
-    const r=await auth.signInWithPopup(provider);
-    fbUser=r.user;return r.user;
-  }catch(e){
-    // Fallback: anonymous if popup blocked or cancelled
-    if(e.code==="auth/popup-blocked"||e.code==="auth/popup-closed-by-user"){
-      try{const r=await auth.signInAnonymously();fbUser=r.user;return r.user}catch(e2){return null}
-    }
-    console.error("Auth:",e);return null;
-  }
+    if(auth.currentUser)return auth.currentUser;
+    const r=await auth.signInAnonymously();
+    return r.user;
+  }catch(e){console.error("Auth:",e);return null}
 }
-function fbSave(uid,data,onDone){
-  if(!db||!uid)return;
-  db.collection("users").doc(uid).set(data).then(onDone).catch(e=>console.error("Save:",e));
+function fbSave(syncId,data,onDone){
+  if(!db||!syncId)return;
+  db.collection("sync").doc(syncId).set(data)
+    .then(onDone||(() =>{}))
+    .catch(e=>console.error("Save:",e));
 }
-function fbListen(uid,onChange){
-  if(!db||!uid)return()=>{};
-  return db.collection("users").doc(uid).onSnapshot(snap=>{if(snap.exists)onChange(snap.data())},e=>console.error("Listen:",e));
+function fbListen(syncId,onChange){
+  if(!db||!syncId)return()=>{};
+  return db.collection("sync").doc(syncId).onSnapshot(
+    snap=>{if(snap.exists)onChange(snap.data())},
+    e=>console.error("Listen:",e)
+  );
 }
 
 // ================================================================
@@ -749,6 +754,8 @@ function App(){
   const[fbReady,setFbReady]=useState(false);
   const[fbUid,setFbUid]=useState(null);
   const[fbEmail,setFbEmail]=useState("");
+  const[syncId,setSyncIdState]=useState(()=>getSyncId());
+  const[syncIdInput,setSyncIdInput]=useState("");
   const[syncCode,setSyncCode]=useState("");
   const[syncInput,setSyncInput]=useState("");
   const[quoteIdx,setQuoteIdx]=useState(0);
@@ -758,34 +765,26 @@ function App(){
   const prevDietRef=useRef(null);
   const fbUnsubRef=useRef(null);
 
-  // Firebase init
+  // Firebase init — anonymous auth + syncId as document key
   useEffect(()=>{
     if(!fbConfig)return;
     const ok=initFirebase(fbConfig);
     if(!ok)return;
-    // Listen for auth state changes (handles page reload)
-    const unsubAuth=auth.onAuthStateChanged(user=>{
-      if(user){
-        setFbUid(user.uid);setFbReady(true);
-        setFbEmail(user.email||"Account anonimo");
-        if(fbUnsubRef.current)fbUnsubRef.current();
-        fbUnsubRef.current=fbListen(user.uid,data=>{
-          setSt(data);try{localStorage.setItem(SK,JSON.stringify(data))}catch(e){}
-        });
-      }else{
-        // Not signed in yet — trigger sign in
-        fbSignIn().then(user=>{
-          if(!user)return;
-          setFbUid(user.uid);setFbReady(true);
-          setFbEmail(user.email||"Account anonimo");
-          fbUnsubRef.current=fbListen(user.uid,data=>{
-            setSt(data);try{localStorage.setItem(SK,JSON.stringify(data))}catch(e){}
-          });
-        });
-      }
+    fbConnect().then(user=>{
+      if(!user)return;
+      setFbUid(user.uid);setFbReady(true);
+      if(fbUnsubRef.current)fbUnsubRef.current();
+      fbUnsubRef.current=fbListen(syncId,data=>{
+        setSt(data);
+        try{localStorage.setItem(SK,JSON.stringify(data))}catch(e){}
+      });
+      // Upload local data if Firestore document doesn't exist yet
+      db.collection("sync").doc(syncId).get().then(snap=>{
+        if(!snap.exists){fbSave(syncId,st,()=>{})}
+      });
     });
-    return()=>{unsubAuth();if(fbUnsubRef.current)fbUnsubRef.current()};
-  },[fbConfig]);
+    return()=>{if(fbUnsubRef.current)fbUnsubRef.current()};
+  },[fbConfig,syncId]);
 
   // Rotating quotes
   useEffect(()=>{
@@ -836,7 +835,7 @@ function App(){
     setSt(ns);
     try{localStorage.setItem(SK,JSON.stringify(ns))}catch(e){}
     if(fH)writeToFile(fH,ns);
-    if(fbReady&&fbUid)fbSave(fbUid,ns,()=>{});
+    if(fbReady&&syncId)fbSave(syncId,ns,()=>{});
   },[fH,writeToFile,fbReady,fbUid]);
 
   // Engine
@@ -1320,26 +1319,31 @@ function App(){
 
         {/* FIREBASE */}
         <C style={{borderLeft:"3px solid var(--bl)"}}>
-          <L>FIREBASE SYNC</L>
-          <div className="g2" style={{marginBottom:12}}>
-            <span className="k">Stato</span>
-            <span className="v" style={{color:fbReady?"var(--gn)":"var(--am)"}}>{fbReady?"✅ Connesso":"⏳ Connessione..."}</span>
-            <span className="k">Account</span>
-            <span className="v" style={{fontSize:11}}>{fbEmail||"—"}</span>
-            <span className="k">Progetto</span>
-            <span className="v">fitness-c485f</span>
-            <span className="k">Sync</span>
-            <span className="v">{fbReady?"PC ↔ iPhone automatico":"In attesa"}</span>
+          <L>SYNC PC ↔ IPHONE</L>
+          <div style={{marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+              <div style={{width:10,height:10,borderRadius:5,background:fbReady?"var(--gn)":"var(--am)"}}/>
+              <span style={{fontSize:14,fontWeight:600,color:fbReady?"var(--gn)":"var(--am)"}}>{fbReady?"Firebase connesso":"Connessione..."}</span>
+            </div>
           </div>
-          {!fbReady&&<button className="bt" style={{background:"var(--bl)",color:"#fff",marginBottom:8}} onClick={()=>fbSignIn().then(u=>{if(u){setFbUid(u.uid);setFbReady(true);setFbEmail(u.email||"Account anonimo")}})}>
-            🔐 Accedi con Google
-          </button>}
-          {fbReady&&<button className="bt" style={{background:"var(--c2)",color:"var(--t3)",fontSize:13}} onClick={()=>{auth?.signOut().then(()=>{setFbReady(false);setFbUid(null);setFbEmail("")})}}>
-            Disconnetti
-          </button>}
-          <p style={{fontSize:11,color:"var(--t4)",lineHeight:1.5,marginTop:8}}>
-            Usa lo stesso account Google su PC e iPhone per sincronizzare i dati automaticamente.
-          </p>
+          <L>IL TUO SYNC ID</L>
+          <div style={{background:"var(--c2)",borderRadius:12,padding:"12px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:13,fontWeight:700,fontFamily:"monospace",color:"var(--t1)",letterSpacing:1}}>{syncId}</span>
+            <button onClick={()=>{navigator.clipboard?.writeText(syncId);alert("Copiato!")}} style={{background:"var(--bl)",border:"none",borderRadius:8,padding:"6px 12px",color:"#fff",fontSize:12,cursor:"pointer",fontFamily:"var(--f)",fontWeight:600}}>Copia</button>
+          </div>
+          <p style={{fontSize:12,color:"var(--t4)",lineHeight:1.6,marginBottom:12}}>Per sincronizzare l'iPhone: copia questo ID → apri l'app su iPhone → Config → incollalo qui sotto → Applica.</p>
+          <L>INCOLLA SYNC ID DA ALTRO DISPOSITIVO</L>
+          <div style={{display:"flex",gap:8}}>
+            <input className="inp" placeholder="Incolla Sync ID..." value={syncIdInput} onChange={e=>setSyncIdInput(e.target.value)} style={{fontSize:13,padding:"10px 12px"}}/>
+            <button className="bt" style={{width:"auto",padding:"10px 16px",background:"var(--gn)",color:"#fff",whiteSpace:"nowrap"}} onClick={()=>{
+              if(!syncIdInput.trim()){return}
+              setSyncId(syncIdInput.trim());
+              setSyncIdState(syncIdInput.trim());
+              setSyncIdInput("");
+              setFbReady(false);
+              alert("Sync ID aggiornato. Ricarica la pagina.");
+            }}>Applica</button>
+          </div>
         </C>
 
         {/* PWA iOS */}
