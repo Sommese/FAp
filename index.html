@@ -86,7 +86,7 @@ const FIREBASE_CONFIG={
   measurementId:"G-DLF7VDCCNW"
 };
 const PHASES=[
-  {id:"recomp",label:"Ricomposizione",start:"2026-05-19",end:"2026-08-31",color:"#2563EB",calAdj:{t:-100,r:-250},wT:[-.2,.1]},
+  {id:"recomp",label:"Ricomposizione",start:"2026-04-15",end:"2026-08-31",color:"#2563EB",calAdj:{t:-100,r:-250},wT:[-.2,.1]},
   {id:"bulk",label:"Lean Bulk",start:"2026-09-01",end:"2027-01-31",color:"#059669",calAdj:{t:300,r:150},wT:[.2,.5]},
   {id:"cut",label:"Cut",start:"2027-02-01",end:"2027-04-30",color:"#DC2626",calAdj:{t:-250,r:-450},wT:[-.6,-.2]},
   {id:"maintain",label:"Mantenimento",start:"2027-05-01",end:"2027-06-30",color:"#7C3AED",calAdj:{t:0,r:0},wT:[-.1,.1]},
@@ -617,7 +617,20 @@ function initFirebase(cfg){
 }
 async function fbSignIn(){
   if(!auth)return null;
-  try{const r=await auth.signInAnonymously();fbUser=r.user;return r.user}catch(e){console.error("Auth:",e);return null}
+  // Try silent re-auth first (already signed in)
+  if(auth.currentUser)return auth.currentUser;
+  try{
+    const provider=new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({prompt:"select_account"});
+    const r=await auth.signInWithPopup(provider);
+    fbUser=r.user;return r.user;
+  }catch(e){
+    // Fallback: anonymous if popup blocked or cancelled
+    if(e.code==="auth/popup-blocked"||e.code==="auth/popup-closed-by-user"){
+      try{const r=await auth.signInAnonymously();fbUser=r.user;return r.user}catch(e2){return null}
+    }
+    console.error("Auth:",e);return null;
+  }
 }
 function fbSave(uid,data,onDone){
   if(!db||!uid)return;
@@ -735,6 +748,7 @@ function App(){
   const[fbConfig,setFbConfig]=useState(FIREBASE_CONFIG);
   const[fbReady,setFbReady]=useState(false);
   const[fbUid,setFbUid]=useState(null);
+  const[fbEmail,setFbEmail]=useState("");
   const[syncCode,setSyncCode]=useState("");
   const[syncInput,setSyncInput]=useState("");
   const[quoteIdx,setQuoteIdx]=useState(0);
@@ -749,14 +763,28 @@ function App(){
     if(!fbConfig)return;
     const ok=initFirebase(fbConfig);
     if(!ok)return;
-    fbSignIn().then(user=>{
-      if(!user)return;
-      setFbUid(user.uid);setFbReady(true);
-      fbUnsubRef.current=fbListen(user.uid,data=>{
-        setSt(data);try{localStorage.setItem(SK,JSON.stringify(data))}catch(e){}
-      });
+    // Listen for auth state changes (handles page reload)
+    const unsubAuth=auth.onAuthStateChanged(user=>{
+      if(user){
+        setFbUid(user.uid);setFbReady(true);
+        setFbEmail(user.email||"Account anonimo");
+        if(fbUnsubRef.current)fbUnsubRef.current();
+        fbUnsubRef.current=fbListen(user.uid,data=>{
+          setSt(data);try{localStorage.setItem(SK,JSON.stringify(data))}catch(e){}
+        });
+      }else{
+        // Not signed in yet — trigger sign in
+        fbSignIn().then(user=>{
+          if(!user)return;
+          setFbUid(user.uid);setFbReady(true);
+          setFbEmail(user.email||"Account anonimo");
+          fbUnsubRef.current=fbListen(user.uid,data=>{
+            setSt(data);try{localStorage.setItem(SK,JSON.stringify(data))}catch(e){}
+          });
+        });
+      }
     });
-    return()=>{if(fbUnsubRef.current)fbUnsubRef.current()};
+    return()=>{unsubAuth();if(fbUnsubRef.current)fbUnsubRef.current()};
   },[fbConfig]);
 
   // Rotating quotes
@@ -1293,12 +1321,25 @@ function App(){
         {/* FIREBASE */}
         <C style={{borderLeft:"3px solid var(--bl)"}}>
           <L>FIREBASE SYNC</L>
-          <div className="g2" style={{marginBottom:10}}>
-            <span className="k">Stato</span><span className="v" style={{color:fbReady?"var(--gn)":"var(--am)"}}>{fbReady?"✅ Connesso":"⏳ Connessione..."}</span>
-            <span className="k">Progetto</span><span className="v">fitness-c485f</span>
-            <span className="k">Sync</span><span className="v">{fbReady?"Automatico — PC ↔ iPhone":"In attesa"}</span>
+          <div className="g2" style={{marginBottom:12}}>
+            <span className="k">Stato</span>
+            <span className="v" style={{color:fbReady?"var(--gn)":"var(--am)"}}>{fbReady?"✅ Connesso":"⏳ Connessione..."}</span>
+            <span className="k">Account</span>
+            <span className="v" style={{fontSize:11}}>{fbEmail||"—"}</span>
+            <span className="k">Progetto</span>
+            <span className="v">fitness-c485f</span>
+            <span className="k">Sync</span>
+            <span className="v">{fbReady?"PC ↔ iPhone automatico":"In attesa"}</span>
           </div>
-          <p style={{fontSize:12,color:"var(--t4)",lineHeight:1.5}}>I dati si sincronizzano automaticamente tra tutti i dispositivi in tempo reale. Nessuna azione richiesta.</p>
+          {!fbReady&&<button className="bt" style={{background:"var(--bl)",color:"#fff",marginBottom:8}} onClick={()=>fbSignIn().then(u=>{if(u){setFbUid(u.uid);setFbReady(true);setFbEmail(u.email||"Account anonimo")}})}>
+            🔐 Accedi con Google
+          </button>}
+          {fbReady&&<button className="bt" style={{background:"var(--c2)",color:"var(--t3)",fontSize:13}} onClick={()=>{auth?.signOut().then(()=>{setFbReady(false);setFbUid(null);setFbEmail("")})}}>
+            Disconnetti
+          </button>}
+          <p style={{fontSize:11,color:"var(--t4)",lineHeight:1.5,marginTop:8}}>
+            Usa lo stesso account Google su PC e iPhone per sincronizzare i dati automaticamente.
+          </p>
         </C>
 
         {/* PWA iOS */}
